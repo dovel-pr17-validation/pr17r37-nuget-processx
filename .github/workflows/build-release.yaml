@@ -1,0 +1,71 @@
+name: Build-Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag: git tag you want create. (sample 1.0.0)"
+        required: true
+      dry-run:
+        description: "dry-run: true will never create release/nuget."
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    permissions:
+      contents: read
+    uses: Cysharp/Actions/.github/workflows/validate-release.yaml@main
+    with:
+      tag: ${{ inputs.tag }}
+
+  build-dotnet:
+    needs: [validate-release]
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: Cysharp/Actions/.github/actions/checkout@main
+      - uses: Cysharp/Actions/.github/actions/setup-dotnet@main
+      # pack nuget
+      - run: dotnet build -c Release -p:Version=${{ needs.validate-release.outputs.tag }}
+      - run: dotnet test -c Release --no-build
+      - run: dotnet pack  -c Release --no-build -p:Version=${{ needs.validate-release.outputs.tag }} -p:IncludeSymbols=true -p:SymbolPackageFormat=snupkg -o ./publish
+      - uses: Cysharp/Actions/.github/actions/upload-artifact@main
+        with:
+          name: nuget
+          path: ./publish
+          retention-days: 1
+
+  # release
+  create-release:
+    needs: [validate-release, build-dotnet]
+    permissions:
+      contents: write
+    uses: Cysharp/Actions/.github/workflows/create-release.yaml@main
+    with:
+      commit-id: ${{ github.sha }}
+      dry-run: ${{ inputs.dry-run }}
+      tag: ${{ needs.validate-release.outputs.tag }}
+    secrets: inherit
+
+  publish-package:
+    needs: [validate-release, create-release]
+    if: ${{ !inputs.dry-run }}
+    permissions:
+      contents: read
+      id-token: write # required for NuGet Trusted Publish in the calling repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: Cysharp/Actions/.github/actions/publish-nuget@main
+        with:
+          artifact-name: nuget
+          user: ${{ secrets.NUGET_USER }}
+          version: ${{ needs.validate-release.outputs.version }}
